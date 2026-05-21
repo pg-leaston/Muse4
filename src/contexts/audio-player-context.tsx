@@ -11,18 +11,34 @@ import {
   type ReactNode,
 } from "react";
 
-import type { LocalSong } from "@/lib/music-library/idb";
+import { listSongs, recordSongPlay, type LocalSong } from "@/lib/music-library/idb";
+import { MIN_PLAY_SECONDS } from "@/lib/music-library/play-history";
+import { filterPlayableTracks } from "@/lib/music-library/playable";
+
+function pickRandomIndex(pool: LocalSong[], avoidId?: string): number {
+  if (pool.length === 0) return 0;
+  if (pool.length === 1) return 0;
+  let idx = Math.floor(Math.random() * pool.length);
+  let attempts = 0;
+  while (avoidId && pool[idx]?.id === avoidId && attempts < 24) {
+    idx = Math.floor(Math.random() * pool.length);
+    attempts += 1;
+  }
+  return idx;
+}
 
 type AudioPlayerContextValue = {
   queue: LocalSong[];
   currentIndex: number;
   currentSong: LocalSong | null;
   isPlaying: boolean;
+  isShuffle: boolean;
   currentTime: number;
   duration: number;
   isScrubbing: boolean;
   setIsScrubbing: (v: boolean) => void;
   playQueue: (songs: LocalSong[], startIndex: number) => void;
+  startShuffle: (songs?: LocalSong[]) => Promise<void>;
   togglePlay: () => void;
   play: () => void;
   pause: () => void;
@@ -43,13 +59,62 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isScrubbing, setIsScrubbing] = useState(false);
+  const [isShuffle, setIsShuffle] = useState(false);
 
   const queueRef = useRef(queue);
+  const currentIndexRef = useRef(currentIndex);
+  const isShuffleRef = useRef(isShuffle);
+  const playSessionRef = useRef<{ songId: string; recorded: boolean } | null>(
+    null,
+  );
+
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
 
+  useEffect(() => {
+    currentIndexRef.current = currentIndex;
+  }, [currentIndex]);
+
+  useEffect(() => {
+    isShuffleRef.current = isShuffle;
+  }, [isShuffle]);
+
   const currentSong = queue[currentIndex] ?? null;
+
+  useEffect(() => {
+    if (!currentSong) {
+      playSessionRef.current = null;
+      return;
+    }
+    playSessionRef.current = { songId: currentSong.id, recorded: false };
+  }, [currentSong?.id]);
+
+  const tryRecordPlay = useCallback(() => {
+    const session = playSessionRef.current;
+    const song = queueRef.current[currentIndexRef.current];
+    if (!session || !song || session.recorded || session.songId !== song.id) {
+      return;
+    }
+    session.recorded = true;
+    void recordSongPlay(song.id);
+  }, []);
+
+  useEffect(() => {
+    if (!isPlaying || !currentSong) return;
+    const session = playSessionRef.current;
+    if (!session || session.songId !== currentSong.id || session.recorded) {
+      return;
+    }
+    const trackDuration = currentSong.durationSeconds;
+    const threshold =
+      trackDuration != null && trackDuration > 0 && trackDuration < MIN_PLAY_SECONDS ?
+        Math.max(3, trackDuration * 0.5)
+      : MIN_PLAY_SECONDS;
+    if (currentTime >= threshold) {
+      tryRecordPlay();
+    }
+  }, [currentTime, isPlaying, currentSong, tryRecordPlay]);
 
   const audioUrl = useMemo(() => {
     if (!currentSong) return null;
@@ -86,8 +151,19 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
 
   const next = useCallback(() => {
     const q = queueRef.current;
+    if (q.length === 0) {
+      setIsPlaying(false);
+      return;
+    }
+
+    if (isShuffleRef.current) {
+      const current = q[currentIndexRef.current];
+      setCurrentIndex(pickRandomIndex(q, current?.id));
+      setIsPlaying(true);
+      return;
+    }
+
     setCurrentIndex((i) => {
-      if (q.length === 0) return 0;
       const n = i + 1;
       if (n >= q.length) {
         setIsPlaying(false);
@@ -109,6 +185,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       setDuration(Number.isFinite(d) ? d : 0);
     };
     const onEnded = () => {
+      tryRecordPlay();
       next();
     };
 
@@ -120,13 +197,30 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       el.removeEventListener("loadedmetadata", onDur);
       el.removeEventListener("ended", onEnded);
     };
-  }, [isScrubbing, audioUrl, next]);
+  }, [isScrubbing, audioUrl, next, tryRecordPlay]);
 
   const playQueue = useCallback((songs: LocalSong[], startIndex: number) => {
-    if (songs.length === 0) return;
-    const idx = Math.min(Math.max(0, startIndex), songs.length - 1);
-    setQueue(songs);
-    setCurrentIndex(idx);
+    const playable = filterPlayableTracks(songs);
+    if (playable.length === 0) return;
+    const original = songs[startIndex];
+    let resolvedIdx = 0;
+    if (original) {
+      const found = playable.findIndex((s) => s.id === original.id);
+      if (found >= 0) resolvedIdx = found;
+    }
+    setIsShuffle(false);
+    setQueue(playable);
+    setCurrentIndex(Math.min(resolvedIdx, playable.length - 1));
+    setIsPlaying(true);
+  }, []);
+
+  const startShuffle = useCallback(async (songs?: LocalSong[]) => {
+    const source = songs ?? (await listSongs());
+    const pool = filterPlayableTracks(source);
+    if (pool.length === 0) return;
+    setIsShuffle(true);
+    setQueue(pool);
+    setCurrentIndex(pickRandomIndex(pool));
     setIsPlaying(true);
   }, []);
 
@@ -161,6 +255,13 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       seek(0);
       return;
     }
+    if (isShuffleRef.current) {
+      const q = queueRef.current;
+      if (q.length === 0) return;
+      const current = q[currentIndexRef.current];
+      setCurrentIndex(pickRandomIndex(q, current?.id));
+      return;
+    }
     setCurrentIndex((i) => Math.max(0, i - 1));
   }, [seek, currentTime]);
 
@@ -189,11 +290,13 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         currentIndex,
         currentSong,
         isPlaying,
+        isShuffle,
         currentTime,
         duration,
         isScrubbing,
         setIsScrubbing,
         playQueue,
+        startShuffle,
         togglePlay,
         play,
         pause,
@@ -208,10 +311,12 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       currentIndex,
       currentSong,
       isPlaying,
+      isShuffle,
       currentTime,
       duration,
       isScrubbing,
       playQueue,
+      startShuffle,
       togglePlay,
       play,
       pause,

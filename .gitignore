@@ -37,6 +37,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# Local song library on disk (mp3, art, lyrics — not committed)
+/Songs/
+
 # Local database files
 *.db
 *.sqlite

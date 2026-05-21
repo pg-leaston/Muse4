@@ -1,7 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Music2, Pause, Pencil, Play, Trash2 } from "lucide-react";
+import {
+  Loader2,
+  Music2,
+  Pause,
+  Pencil,
+  Play,
+  Shuffle,
+  Trash2,
+} from "lucide-react";
 
 import {
   AlertDialog,
@@ -16,25 +24,28 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SongFormDialog } from "@/components/music/song-form-dialog";
+import { TopPlayedPanel } from "@/components/music/top-played-panel";
 import { useAudioPlayer } from "@/contexts/audio-player-context";
 import { formatTime } from "@/lib/format-time";
 import { deleteSong, listSongs, type LocalSong } from "@/lib/music-library/idb";
+import {
+  formatLastPlayed,
+  formatPlayCount,
+  formatPlayLogTooltip,
+  PLAY_RECORDED_EVENT,
+  type PlayRecordedDetail,
+} from "@/lib/music-library/play-history";
+import { filterPlayableTracks } from "@/lib/music-library/playable";
+import {
+  fetchLibraryScan,
+  importLibraryFromSongsFolder,
+} from "@/lib/music-library/import-from-folder";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
 import { cn } from "@/lib/utils";
 
-const PLAYLISTS = [
-  { id: "all", label: "All Songs" },
-  { id: "november", label: "November" },
-  { id: "december", label: "December" },
-  { id: "autumn", label: "Autumn" },
-  { id: "winter", label: "Winter" },
-  { id: "spring", label: "Spring" },
-  { id: "summer", label: "Summer" },
-] as const;
+type PlaylistOption = { id: string; label: string };
 
-type PlaylistFilter = (typeof PLAYLISTS)[number]["id"];
-
-const monthFormatter = new Intl.DateTimeFormat("en-US", { month: "long" });
+const ALL_PLAYLIST: PlaylistOption = { id: "all", label: "All Songs" };
 
 function ArtworkThumb({ blob }: { blob: Blob }) {
   const url = useMemo(() => URL.createObjectURL(blob), [blob]);
@@ -52,27 +63,25 @@ function ArtworkThumb({ blob }: { blob: Blob }) {
   );
 }
 
-function getSeason(date: Date) {
-  const month = date.getMonth();
-  if (month >= 2 && month <= 4) return "spring";
-  if (month >= 5 && month <= 7) return "summer";
-  if (month >= 8 && month <= 10) return "autumn";
-  return "winter";
-}
-
-function matchesPlaylist(song: LocalSong, playlist: PlaylistFilter) {
-  if (playlist === "all") return true;
-  const createdAt = new Date(song.createdAt);
-  return (
-    monthFormatter.format(createdAt).toLowerCase() === playlist ||
-    getSeason(createdAt) === playlist
-  );
+function matchesPlaylist(song: LocalSong, playlistId: string) {
+  if (playlistId === "all") return true;
+  return song.playlistId === playlistId;
 }
 
 function getAlbumLabel(song: LocalSong) {
-  const createdAt = new Date(song.createdAt);
-  const albumName = song.album.trim() || `${monthFormatter.format(createdAt)} Sessions`;
+  const albumName = song.album.trim() || "Unknown album";
   return song.releaseYear ? `${albumName} (${song.releaseYear})` : albumName;
+}
+
+function buildPlaylistOptions(songs: LocalSong[]): PlaylistOption[] {
+  const ids = new Set<string>();
+  for (const song of songs) {
+    if (song.playlistId.trim()) ids.add(song.playlistId);
+  }
+  const fromLibrary = Array.from(ids)
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
+    .map((id) => ({ id, label: id }));
+  return [ALL_PLAYLIST, ...fromLibrary];
 }
 
 export function LibraryPageClient() {
@@ -82,10 +91,25 @@ export function LibraryPageClient() {
   const [editId, setEditId] = useState<string | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [playlist, setPlaylist] = useState<PlaylistFilter>("all");
+  const [playlist, setPlaylist] = useState("all");
+  const [folderPlaylists, setFolderPlaylists] = useState<PlaylistOption[]>([]);
+  const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState<{
+    done: number;
+    total: number;
+    currentTitle: string;
+  } | null>(null);
+  const [importMessage, setImportMessage] = useState<string | null>(null);
 
-  const { currentSong, isPlaying, playQueue, removeSongFromPlayer, togglePlay } =
-    useAudioPlayer();
+  const {
+    currentSong,
+    isPlaying,
+    isShuffle,
+    playQueue,
+    startShuffle,
+    removeSongFromPlayer,
+    togglePlay,
+  } = useAudioPlayer();
 
   const refresh = useCallback(async () => {
     setSongs(await listSongs());
@@ -101,15 +125,67 @@ export function LibraryPageClient() {
     };
   }, []);
 
+  useEffect(() => {
+    const onPlayRecorded = (event: Event) => {
+      const { songId, playCount, lastPlayedAt, playedAtLog } = (
+        event as CustomEvent<PlayRecordedDetail>
+      ).detail;
+      setSongs((prev) =>
+        prev.map((song) =>
+          song.id === songId ?
+            { ...song, playCount, lastPlayedAt, playedAtLog }
+          : song,
+        ),
+      );
+    };
+    window.addEventListener(PLAY_RECORDED_EVENT, onPlayRecorded);
+    return () =>
+      window.removeEventListener(PLAY_RECORDED_EVENT, onPlayRecorded);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchLibraryScan()
+      .then((scan) => {
+        if (cancelled) return;
+        setFolderPlaylists(
+          scan.playlists.map((p) => ({ id: p.id, label: p.label })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setFolderPlaylists([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const playlistOptions = useMemo(() => {
+    const merged = new Map<string, PlaylistOption>();
+    merged.set(ALL_PLAYLIST.id, ALL_PLAYLIST);
+    for (const item of buildPlaylistOptions(songs)) {
+      if (item.id !== "all") merged.set(item.id, item);
+    }
+    for (const item of folderPlaylists) {
+      if (!merged.has(item.id)) merged.set(item.id, item);
+    }
+    return Array.from(merged.values());
+  }, [songs, folderPlaylists]);
+
   const deleteTarget = useMemo(
     () => songs.find((s) => s.id === deleteId),
     [songs, deleteId],
   );
 
+  const playableSongs = useMemo(
+    () => filterPlayableTracks(songs),
+    [songs],
+  );
+
   const filteredSongs = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    return songs.filter((song) => {
+    return playableSongs.filter((song) => {
       if (!matchesPlaylist(song, playlist)) return false;
       if (!query) return true;
 
@@ -124,17 +200,66 @@ export function LibraryPageClient() {
 
       return haystack.includes(query);
     });
-  }, [playlist, search, songs]);
+  }, [playlist, search, playableSongs]);
 
   const playlistCounts = useMemo(() => {
-    return PLAYLISTS.reduce(
-      (acc, item) => {
-        acc[item.id] = songs.filter((song) => matchesPlaylist(song, item.id)).length;
-        return acc;
-      },
-      {} as Record<PlaylistFilter, number>,
+    const counts: Record<string, number> = {};
+    for (const item of playlistOptions) {
+      counts[item.id] = playableSongs.filter((song) =>
+        matchesPlaylist(song, item.id),
+      ).length;
+    }
+    return counts;
+  }, [playableSongs, playlistOptions]);
+
+  async function handleImportFromSongsFolder() {
+    setImportMessage(null);
+    let scan;
+    try {
+      scan = await fetchLibraryScan();
+    } catch (err) {
+      setImportMessage(
+        err instanceof Error ? err.message : "Could not read Songs folder.",
+      );
+      return;
+    }
+
+    const total = scan.songs.length;
+    if (total === 0) {
+      setImportMessage("No songs found in the Songs folder.");
+      return;
+    }
+
+    const ok = window.confirm(
+      `Import ${total} tracks from Songs/ into your browser library? This may take several minutes.`,
     );
-  }, [songs]);
+    if (!ok) return;
+
+    setImporting(true);
+    setImportProgress({ done: 0, total, currentTitle: "" });
+
+    try {
+      const { imported, failed, skipped } =
+        await importLibraryFromSongsFolder({
+          onProgress: setImportProgress,
+        });
+      await refresh();
+      const skipNote =
+        skipped > 0 ? ` ${skipped} skipped (0:00 duration).` : "";
+      setImportMessage(
+        failed > 0 ?
+          `Imported ${imported} tracks (${failed} failed).${skipNote} Playlists match subfolders in Songs/.`
+        : `Imported ${imported} tracks.${skipNote} Playlists match subfolders in Songs/.`,
+      );
+    } catch (err) {
+      setImportMessage(
+        err instanceof Error ? err.message : "Import failed.",
+      );
+    } finally {
+      setImporting(false);
+      setImportProgress(null);
+    }
+  }
 
   async function confirmDelete() {
     if (!deleteId) return;
@@ -144,16 +269,20 @@ export function LibraryPageClient() {
     await refresh();
   }
 
-  function handlePlaySong(index: number) {
-    const target = filteredSongs[index];
-    if (!target) return;
-
+  function playSongFromLibrary(target: LocalSong, pool: LocalSong[] = filteredSongs) {
     if (currentSong?.id === target.id) {
       togglePlay();
       return;
     }
+    const idx = pool.findIndex((s) => s.id === target.id);
+    if (idx < 0) return;
+    playQueue(pool, idx);
+  }
 
-    playQueue(filteredSongs, index);
+  function handlePlaySong(index: number) {
+    const target = filteredSongs[index];
+    if (!target) return;
+    playSongFromLibrary(target);
   }
 
   function handleRowDoubleClick(index: number) {
@@ -185,20 +314,68 @@ export function LibraryPageClient() {
             </p>
           </div>
 
-          <Button
-            type="button"
-            className="h-9 rounded-md bg-white px-4 text-sm font-semibold text-black hover:bg-white/90"
-            onClick={() => {
-              setFormMode("create");
-              setEditId(null);
-              setFormOpen(true);
-            }}
-          >
-            Add Track
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              className={cn(
+                "h-9 border-white/20 bg-white/8 text-white hover:bg-white/14",
+                isShuffle && "border-violet-300/40 bg-violet-500/20",
+              )}
+              disabled={importing || filteredSongs.length === 0}
+              onClick={() => void startShuffle(filteredSongs)}
+            >
+              <Shuffle className="size-4" />
+              Shuffle
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-9 border-white/20 bg-white/8 text-white hover:bg-white/14"
+              disabled={importing}
+              onClick={() => void handleImportFromSongsFolder()}
+            >
+              {importing ?
+                <>
+                  <Loader2 className="animate-spin" />
+                  Importing…
+                </>
+              : "Import Songs folder"}
+            </Button>
+            <Button
+              type="button"
+              className="h-9 rounded-md bg-white px-4 text-sm font-semibold text-black hover:bg-white/90"
+              disabled={importing}
+              onClick={() => {
+                setFormMode("create");
+                setEditId(null);
+                setFormOpen(true);
+              }}
+            >
+              Add Track
+            </Button>
+          </div>
         </header>
 
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_220px]">
+        {importProgress ?
+          <div className="rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-sm text-white/80">
+            <p className="flex items-center gap-2">
+              <Loader2 className="size-4 shrink-0 animate-spin" />
+              Importing {importProgress.done} / {importProgress.total}
+              {importProgress.currentTitle ?
+                ` — ${importProgress.currentTitle}`
+              : null}
+            </p>
+          </div>
+        : null}
+
+        {importMessage ?
+          <p className="rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-sm text-white/78">
+            {importMessage}
+          </p>
+        : null}
+
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(260px,300px)]">
           <section className="rounded-[34px] border border-white/10 bg-black/15 p-4 shadow-[0_24px_80px_rgba(0,0,0,0.35)] backdrop-blur-sm sm:p-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="w-full max-w-xs">
@@ -211,7 +388,8 @@ export function LibraryPageClient() {
               </div>
 
               <div className="rounded-md border border-white/15 bg-white/8 px-3 py-2 text-xs font-semibold tracking-[0.22em] text-white/78 uppercase">
-                {PLAYLISTS.find((item) => item.id === playlist)?.label}
+                {playlistOptions.find((item) => item.id === playlist)?.label ??
+                  "All Songs"}
               </div>
             </div>
 
@@ -266,13 +444,23 @@ export function LibraryPageClient() {
                                 : <Music2 className="size-5 text-white/55" />}
                               </div>
 
-                              <div className="min-w-0">
+                              <div
+                                className="min-w-0"
+                                title={formatPlayLogTooltip(song.playedAtLog)}
+                              >
                                 <p className="truncate text-[15px] font-medium text-white">
                                   {song.title}
                                 </p>
                                 <p className="truncate text-xs text-white/52">
                                   {formatTime(song.durationSeconds ?? 0)}
+                                  <span className="text-white/38"> · </span>
+                                  {formatPlayCount(song.playCount)}
                                 </p>
+                                {song.lastPlayedAt ?
+                                  <p className="truncate text-[11px] text-white/40">
+                                    Last {formatLastPlayed(song.lastPlayedAt)}
+                                  </p>
+                                : null}
                               </div>
                             </div>
 
@@ -332,7 +520,14 @@ export function LibraryPageClient() {
             </div>
           </section>
 
-          <aside className="rounded-[30px] border border-white/10 bg-black/15 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.35)] backdrop-blur-sm">
+          <div className="flex flex-col gap-6">
+            <TopPlayedPanel
+              songs={playableSongs}
+              currentSongId={currentSong?.id ?? null}
+              onPlaySong={(song) => playSongFromLibrary(song, playableSongs)}
+            />
+
+            <aside className="rounded-[30px] border border-white/10 bg-black/15 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.35)] backdrop-blur-sm">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-[2rem] font-semibold text-white">Playlists</h2>
               <div className="rounded-md border border-white/15 bg-white/8 px-3 py-2 text-xs font-semibold tracking-[0.2em] text-white/72 uppercase">
@@ -341,8 +536,9 @@ export function LibraryPageClient() {
             </div>
 
             <div className="mt-5 flex flex-col gap-2">
-              {PLAYLISTS.map((item) => {
+              {playlistOptions.map((item) => {
                 const selected = playlist === item.id;
+                const count = playlistCounts[item.id] ?? 0;
 
                 return (
                   <button
@@ -356,9 +552,9 @@ export function LibraryPageClient() {
                     )}
                     onClick={() => setPlaylist(item.id)}
                   >
-                    <span>{item.label}</span>
-                    <span className="text-xs font-semibold tracking-[0.16em] uppercase text-white/55">
-                      {playlistCounts[item.id]}
+                    <span className="truncate">{item.label}</span>
+                    <span className="ml-2 shrink-0 text-xs font-semibold tracking-[0.16em] uppercase text-white/55">
+                      {count}
                     </span>
                   </button>
                 );
@@ -366,11 +562,12 @@ export function LibraryPageClient() {
             </div>
 
             <p className="mt-6 text-xs leading-5 text-white/52">
-              Playlist buckets are generated from each track&apos;s import month
-              and season. Album names and release years are now editable per
-              song from the track dialog.
+              Each subfolder in <span className="text-white/70">Songs/</span> is
+              a playlist. Use Import Songs folder to load mp3, cover art, and
+              lyrics from your on-disk library.
             </p>
-          </aside>
+            </aside>
+          </div>
         </div>
 
         <SongFormDialog

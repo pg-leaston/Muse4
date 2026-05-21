@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useMemo } from "react";
-import { Music2, Pause, Play, SkipBack, SkipForward } from "lucide-react";
+import {
+  Music2,
+  Pause,
+  Play,
+  Shuffle,
+  SkipBack,
+  SkipForward,
+} from "lucide-react";
 
 import { useAudioPlayer } from "@/contexts/audio-player-context";
 import { formatTime } from "@/lib/format-time";
@@ -29,6 +36,8 @@ export function PlayBar() {
     next,
     previous,
     setIsScrubbing,
+    startShuffle,
+    isShuffle,
   } = useAudioPlayer();
 
   const artUrl = useMemo(() => {
@@ -109,6 +118,20 @@ export function PlayBar() {
               </div>
 
               <div className="flex w-full max-w-3xl items-center gap-2 sm:gap-4">
+                <button
+                  type="button"
+                  className={cn(
+                    "grid size-8 shrink-0 place-items-center rounded-full border border-white/20 bg-white/8 transition hover:bg-white/14",
+                    isShuffle &&
+                      "border-violet-300/40 bg-violet-500/25 text-violet-100",
+                  )}
+                  aria-label="Shuffle all tracks"
+                  aria-pressed={isShuffle}
+                  onClick={() => void startShuffle()}
+                >
+                  <Shuffle className="size-4" />
+                </button>
+
                 <button
                   type="button"
                   disabled={disabled}

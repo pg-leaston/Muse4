@@ -6,7 +6,6 @@ export type Json =
   | { [key: string]: Json | undefined }
   | Json[];
 
-/** Replace with `supabase gen types typescript --linked` output when your project is live. */
 export interface Database {
   public: {
     Tables: {
@@ -21,6 +20,11 @@ export interface Database {
           audio_storage_path: string;
           artwork_storage_path: string | null;
           duration_seconds: number | null;
+          lyrics: string | null;
+          playlist_id: string;
+          source_key: string | null;
+          genre: string;
+          explicit: boolean;
           sort_order: number;
           created_at: string;
           updated_at: string;
@@ -35,6 +39,11 @@ export interface Database {
           audio_storage_path: string;
           artwork_storage_path?: string | null;
           duration_seconds?: number | null;
+          lyrics?: string | null;
+          playlist_id?: string;
+          source_key?: string | null;
+          genre?: string;
+          explicit?: boolean;
           sort_order?: number;
           created_at?: string;
           updated_at?: string;
@@ -49,6 +58,11 @@ export interface Database {
           audio_storage_path?: string;
           artwork_storage_path?: string | null;
           duration_seconds?: number | null;
+          lyrics?: string | null;
+          playlist_id?: string;
+          source_key?: string | null;
+          genre?: string;
+          explicit?: boolean;
           sort_order?: number;
           created_at?: string;
           updated_at?: string;

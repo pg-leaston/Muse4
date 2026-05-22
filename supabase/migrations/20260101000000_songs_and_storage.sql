@@ -38,7 +38,7 @@ values ('tracks', 'tracks', false)
 on conflict (id) do nothing;
 
 insert into storage.buckets (id, name, public)
-values ('track-artwork', 'track-artwork', false)
+values ('track_artwork', 'track_artwork', false)
 on conflict (id) do nothing;
 
 -- Allow authenticated users to manage objects under their user_id prefix
@@ -77,7 +77,7 @@ on storage.objects for delete to authenticated using (
 
 create policy "art_select_own"
 on storage.objects for select to authenticated using (
-  bucket_id = 'track-artwork'
+  bucket_id = 'track_artwork'
   and (string_to_array (name, '/'))[1] = auth.uid()::text
 );
 
@@ -85,7 +85,7 @@ create policy "art_insert_own"
 on storage.objects for insert to authenticated
 with
   check (
-    bucket_id = 'track-artwork'
+    bucket_id = 'track_artwork'
     and (string_to_array (name, '/'))[1] = auth.uid()::text
   );
 
@@ -93,17 +93,17 @@ create policy "art_update_own"
 on storage.objects
 for update
   to authenticated using (
-    bucket_id = 'track-artwork'
+    bucket_id = 'track_artwork'
     and (string_to_array (name, '/'))[1] = auth.uid()::text
   )
 with
   check (
-    bucket_id = 'track-artwork'
+    bucket_id = 'track_artwork'
     and (string_to_array (name, '/'))[1] = auth.uid()::text
   );
 
 create policy "art_delete_own"
 on storage.objects for delete to authenticated using (
-  bucket_id = 'track-artwork'
+  bucket_id = 'track_artwork'
   and (string_to_array (name, '/'))[1] = auth.uid()::text
 );

@@ -7,8 +7,10 @@ import {
   readSupabaseUrl,
 } from "@/lib/supabase/env";
 
-export async function createClient() {
-  const cookieStore = await cookies();
+export async function createClient(
+  cookieStore?: Awaited<ReturnType<typeof cookies>>,
+) {
+  const store = cookieStore ?? (await cookies());
 
   const supabaseUrl = readSupabaseUrl();
   const supabaseKey = readSupabasePublishableOrAnonKey();
@@ -22,15 +24,15 @@ export async function createClient() {
   return createServerClient<Database>(supabaseUrl, supabaseKey, {
     cookies: {
       getAll() {
-        return cookieStore.getAll();
+        return store.getAll();
       },
       setAll(cookiesToSet) {
         try {
           cookiesToSet.forEach(({ name, value, options }) =>
-            cookieStore.set(name, value, options),
+            store.set(name, value, options),
           );
         } catch {
-          // Server Component refresh path — middleware can keep sessions in sync when you add it.
+          // Server Component — middleware keeps sessions refreshed.
         }
       },
     },

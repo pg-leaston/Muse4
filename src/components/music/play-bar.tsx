@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo } from "react";
 import {
   Music2,
@@ -11,6 +12,8 @@ import {
 } from "lucide-react";
 
 import { useAudioPlayer } from "@/contexts/audio-player-context";
+import { useAuth } from "@/contexts/auth-context";
+import { trackArtworkSrc, trackHasArtBlob } from "@/lib/music-library/library-track";
 import { formatTime } from "@/lib/format-time";
 import { cn } from "@/lib/utils";
 
@@ -39,17 +42,20 @@ export function PlayBar() {
     startShuffle,
     isShuffle,
   } = useAudioPlayer();
+  const { user, signOut } = useAuth();
 
-  const artUrl = useMemo(() => {
-    if (!currentSong?.artworkBlob) return null;
+  const blobArtUrl = useMemo(() => {
+    if (!currentSong || !trackHasArtBlob(currentSong)) return null;
     return URL.createObjectURL(currentSong.artworkBlob);
   }, [currentSong]);
 
+  const artUrl = trackArtworkSrc(currentSong) ?? blobArtUrl;
+
   useEffect(() => {
     return () => {
-      if (artUrl) URL.revokeObjectURL(artUrl);
+      if (blobArtUrl) URL.revokeObjectURL(blobArtUrl);
     };
-  }, [artUrl]);
+  }, [blobArtUrl]);
 
   const hasTrack = Boolean(currentSong);
   const max = duration > 0 ? duration : 1;
@@ -67,14 +73,39 @@ export function PlayBar() {
                 key={item}
                 type="button"
                 className="transition hover:text-white"
+                onClick={
+                  item === "Account" && !user ?
+                    () => {
+                      window.location.href = "/auth/login";
+                    }
+                  : undefined
+                }
               >
                 {item}
               </button>
             ))}
           </nav>
 
-          <div className="rounded-md border border-white/15 bg-white/8 px-3 py-1 text-[11px] font-semibold tracking-[0.2em] text-white/85 uppercase">
-            Local User
+          <div className="flex items-center gap-2">
+            {user ?
+              <>
+                <span className="max-w-[200px] truncate rounded-md border border-white/15 bg-white/8 px-3 py-1 text-[11px] font-medium tracking-wide text-white/85 normal-case">
+                  {user.email}
+                </span>
+                <button
+                  type="button"
+                  className="rounded-md border border-white/15 bg-white/8 px-3 py-1 text-[11px] font-semibold tracking-wide text-white/85 uppercase transition hover:bg-white/14"
+                  onClick={() => void signOut()}
+                >
+                  Sign out
+                </button>
+              </>
+            : <Link
+                href="/auth/login"
+                className="rounded-md border border-white/15 bg-white/8 px-3 py-1 text-[11px] font-semibold tracking-[0.2em] text-white/85 uppercase transition hover:bg-white/14"
+              >
+                Sign in
+              </Link>}
           </div>
         </div>
       </div>

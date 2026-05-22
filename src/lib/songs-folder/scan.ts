@@ -17,6 +17,8 @@ export type ScannedSong = {
   artist: string;
   album: string;
   releaseYear: number | null;
+  genre: string;
+  explicit: boolean;
   lyrics: string | null;
   audioRelativePath: string;
   artworkRelativePath: string | null;
@@ -117,6 +119,8 @@ async function scanSongFolder(
     artist: meta.artist,
     album: meta.album,
     releaseYear: meta.releaseYear,
+    genre: meta.genre,
+    explicit: meta.explicit,
     lyrics,
     audioRelativePath,
     artworkRelativePath,

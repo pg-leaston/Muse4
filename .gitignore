@@ -24,11 +24,14 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-.env*
-!.env.example
+# Secrets — use a single `.env` at the project root (never commit)
+.env
+.env.local
+.env.*.local
 
 .cursor/mcp.json
 .mcp.json
+!.cursor/mcp.json.example
 
 *.log
 

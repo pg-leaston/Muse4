@@ -6,7 +6,7 @@ function withConnectTimeout(url: string): string {
   const t = url.trim();
   if (/[?&]connect_timeout=/iu.test(t)) return t;
   const join = t.includes("?") ? "&" : "?";
-  return `${t}${join}connect_timeout=15`;
+  return `${t}${join}connect_timeout=20`;
 }
 
 function ensureSslForSupabase(url: string): string {
@@ -20,7 +20,7 @@ function ensureSslForSupabase(url: string): string {
 const databaseUrl = ensureSslForSupabase(withConnectTimeout(resolveDatabaseUrl()));
 
 export default defineConfig({
-  schema: "./src/db/schema.ts",
+  schema: "./drizzle/schema.ts",
   out: "./drizzle",
   dialect: "postgresql",
   dbCredentials: {

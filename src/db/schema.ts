@@ -1,10 +1,13 @@
+import { sql } from "drizzle-orm";
 import {
+  boolean,
   doublePrecision,
   index,
   integer,
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -20,9 +23,14 @@ export const songs = pgTable(
     releaseYear: integer("release_year"),
     /** Storage object path in the `tracks` bucket, e.g. `${userId}/${id}.mp3` */
     audioStoragePath: text("audio_storage_path").notNull(),
-    /** Optional cover in the `track-artwork` bucket */
+    /** Optional cover in the `track_artwork` bucket */
     artworkStoragePath: text("artwork_storage_path"),
     durationSeconds: doublePrecision("duration_seconds"),
+    lyrics: text("lyrics"),
+    playlistId: text("playlist_id").notNull().default(""),
+    sourceKey: text("source_key"),
+    genre: text("genre").notNull().default(""),
+    explicit: boolean("explicit").notNull().default(false),
     sortOrder: integer("sort_order").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
@@ -31,7 +39,12 @@ export const songs = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [index("songs_user_id_sort_idx").on(t.userId, t.sortOrder)],
+  (t) => [
+    index("songs_user_id_sort_idx").on(t.userId, t.sortOrder),
+    uniqueIndex("songs_user_source_key_idx")
+      .on(t.userId, t.sourceKey)
+      .where(sql`${t.sourceKey} is not null`),
+  ],
 );
 
 export type SongRow = typeof songs.$inferSelect;

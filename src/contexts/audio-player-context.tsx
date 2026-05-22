@@ -11,11 +11,15 @@ import {
   type ReactNode,
 } from "react";
 
-import { listSongs, recordSongPlay, type LocalSong } from "@/lib/music-library/idb";
+import { listSongs, recordSongPlay } from "@/lib/music-library/idb";
+import {
+  attachSignedPlaybackUrls,
+} from "@/lib/music-library/cloud-library";
+import { fromLocalSong, type LibraryTrack } from "@/lib/music-library/library-track";
 import { MIN_PLAY_SECONDS } from "@/lib/music-library/play-history";
 import { filterPlayableTracks } from "@/lib/music-library/playable";
 
-function pickRandomIndex(pool: LocalSong[], avoidId?: string): number {
+function pickRandomIndex(pool: LibraryTrack[], avoidId?: string): number {
   if (pool.length === 0) return 0;
   if (pool.length === 1) return 0;
   let idx = Math.floor(Math.random() * pool.length);
@@ -27,18 +31,25 @@ function pickRandomIndex(pool: LocalSong[], avoidId?: string): number {
   return idx;
 }
 
+function resolveAudioSrc(track: LibraryTrack | null): string | null {
+  if (!track) return null;
+  if (track.source === "cloud") return track.audioPlaybackUrl ?? null;
+  if (track.audioBlob) return URL.createObjectURL(track.audioBlob);
+  return null;
+}
+
 type AudioPlayerContextValue = {
-  queue: LocalSong[];
+  queue: LibraryTrack[];
   currentIndex: number;
-  currentSong: LocalSong | null;
+  currentSong: LibraryTrack | null;
   isPlaying: boolean;
   isShuffle: boolean;
   currentTime: number;
   duration: number;
   isScrubbing: boolean;
   setIsScrubbing: (v: boolean) => void;
-  playQueue: (songs: LocalSong[], startIndex: number) => void;
-  startShuffle: (songs?: LocalSong[]) => Promise<void>;
+  playQueue: (songs: LibraryTrack[], startIndex: number) => Promise<void>;
+  startShuffle: (songs?: LibraryTrack[]) => Promise<void>;
   togglePlay: () => void;
   play: () => void;
   pause: () => void;
@@ -53,7 +64,7 @@ const AudioPlayerContext = createContext<AudioPlayerContextValue | null>(null);
 
 export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [queue, setQueue] = useState<LocalSong[]>([]);
+  const [queue, setQueue] = useState<LibraryTrack[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -67,7 +78,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const playSessionRef = useRef<{ songId: string; recorded: boolean } | null>(
     null,
   );
-
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
@@ -96,6 +106,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     if (!session || !song || session.recorded || session.songId !== song.id) {
       return;
     }
+    if (song.source !== "local") return;
     session.recorded = true;
     void recordSongPlay(song.id);
   }, []);
@@ -116,16 +127,18 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     }
   }, [currentTime, isPlaying, currentSong, tryRecordPlay]);
 
-  const audioUrl = useMemo(() => {
-    if (!currentSong) return null;
-    return URL.createObjectURL(currentSong.audioBlob);
-  }, [currentSong]);
+  const audioUrl = useMemo(
+    () => resolveAudioSrc(currentSong),
+    [currentSong],
+  );
 
   useEffect(() => {
+    const url = audioUrl;
+    const isLocalBlob = currentSong?.source === "local";
     return () => {
-      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      if (url && isLocalBlob) URL.revokeObjectURL(url);
     };
-  }, [audioUrl]);
+  }, [audioUrl, currentSong?.source]);
 
   useEffect(() => {
     const el = audioRef.current;
@@ -199,30 +212,47 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     };
   }, [isScrubbing, audioUrl, next, tryRecordPlay]);
 
-  const playQueue = useCallback((songs: LocalSong[], startIndex: number) => {
+  const prepareQueue = useCallback(async (songs: LibraryTrack[]) => {
     const playable = filterPlayableTracks(songs);
-    if (playable.length === 0) return;
-    const original = songs[startIndex];
-    let resolvedIdx = 0;
-    if (original) {
-      const found = playable.findIndex((s) => s.id === original.id);
-      if (found >= 0) resolvedIdx = found;
-    }
-    setIsShuffle(false);
-    setQueue(playable);
-    setCurrentIndex(Math.min(resolvedIdx, playable.length - 1));
-    setIsPlaying(true);
+    const needsSign = playable.some(
+      (s) => s.source === "cloud" && !s.audioPlaybackUrl,
+    );
+    if (!needsSign) return playable;
+    return attachSignedPlaybackUrls(playable);
   }, []);
 
-  const startShuffle = useCallback(async (songs?: LocalSong[]) => {
-    const source = songs ?? (await listSongs());
-    const pool = filterPlayableTracks(source);
-    if (pool.length === 0) return;
-    setIsShuffle(true);
-    setQueue(pool);
-    setCurrentIndex(pickRandomIndex(pool));
-    setIsPlaying(true);
-  }, []);
+  const playQueue = useCallback(
+    async (songs: LibraryTrack[], startIndex: number) => {
+      const playable = await prepareQueue(songs);
+      if (playable.length === 0) return;
+      const original = songs[startIndex];
+      let resolvedIdx = 0;
+      if (original) {
+        const found = playable.findIndex((s) => s.id === original.id);
+        if (found >= 0) resolvedIdx = found;
+      }
+      setIsShuffle(false);
+      setQueue(playable);
+      setCurrentIndex(Math.min(resolvedIdx, playable.length - 1));
+      setIsPlaying(true);
+    },
+    [prepareQueue],
+  );
+
+  const startShuffle = useCallback(
+    async (songs?: LibraryTrack[]) => {
+      const source =
+        songs ??
+        (await listSongs()).map(fromLocalSong);
+      const pool = await prepareQueue(source);
+      if (pool.length === 0) return;
+      setIsShuffle(true);
+      setQueue(pool);
+      setCurrentIndex(pickRandomIndex(pool));
+      setIsPlaying(true);
+    },
+    [prepareQueue],
+  );
 
   const togglePlay = useCallback(() => {
     setIsPlaying((p) => !p);

@@ -33,8 +33,50 @@ function jdbcParses(connectionString: string): boolean {
   }
 }
 
+/** Password characters that must be percent-encoded in a JDBC URL (e.g. `?` starts a query string). */
+function passwordNeedsEncoding(connectionString: string): boolean {
+  const protoMatch = /^postgres(ql)?:\/\//iu.exec(connectionString);
+  if (!protoMatch) return false;
+  const withoutProto = connectionString.slice(protoMatch[0].length);
+  const at = withoutProto.lastIndexOf("@");
+  if (at <= 0) return false;
+  const userinfo = withoutProto.slice(0, at);
+  const colon = userinfo.indexOf(":");
+  if (colon < 0) return false;
+  const rawPassword = userinfo.slice(colon + 1);
+  return /[^A-Za-z0-9._~-]/.test(rawPassword);
+}
+
+/** True when URL.parse would drop or corrupt the password (common if it starts with `?`, `#`, `@`). */
+function credentialsRoundTripBroken(connectionString: string): boolean {
+  if (!jdbcParses(connectionString)) return true;
+  const protoMatch = /^postgres(ql)?:\/\//iu.exec(connectionString);
+  if (!protoMatch) return true;
+  const withoutProto = connectionString.slice(protoMatch[0].length);
+  const at = withoutProto.lastIndexOf("@");
+  if (at <= 0) return true;
+  const userinfo = withoutProto.slice(0, at);
+  const colon = userinfo.indexOf(":");
+  if (colon < 0) return true;
+  const rawPassword = userinfo.slice(colon + 1);
+  try {
+    const normalized = connectionString.replace(/^postgres(ql)?:\/\//iu, "http://");
+    const u = new URL(normalized);
+    const parsedPassword = decodeURIComponent(u.password);
+    return parsedPassword !== rawPassword;
+  } catch {
+    return true;
+  }
+}
+
 function coerceParseablePostgreSqlJdbcUrl(connectionString: string): string {
-  if (jdbcParses(connectionString)) return connectionString;
+  const mustEncode =
+    passwordNeedsEncoding(connectionString) ||
+    credentialsRoundTripBroken(connectionString);
+
+  if (jdbcParses(connectionString) && !mustEncode) {
+    return connectionString;
+  }
 
   const protoMatch = /^postgres(ql)?:\/\//iu.exec(connectionString);
   if (!protoMatch) throw new Error("Expected postgresql:// or postgres:// URI.");
@@ -153,6 +195,17 @@ function assertNoConnectionStringPlaceholder(connectionString: string): void {
   }
 }
 
+function warnIfDirectSupabaseDbHost(connectionString: string): void {
+  if (!/db\.[a-z0-9]+\.supabase\.co\b/i.test(connectionString)) return;
+  console.warn(
+    [
+      "[muse4] DATABASE_URL uses the direct db.*.supabase.co host.",
+      "On many IPv4 networks this hangs until timeout.",
+      "Use the Transaction pooler URI from Supabase (pooler.supabase.com, port 6543) instead.",
+    ].join(" "),
+  );
+}
+
 export function resolveDatabaseUrl(): string {
   for (const key of POSTGRES_URI_ENV_KEYS) {
     const raw = process.env[key];
@@ -162,11 +215,12 @@ export function resolveDatabaseUrl(): string {
     assertNoConnectionStringPlaceholder(v);
     const coerced = coerceParseablePostgreSqlJdbcUrl(v);
     assertLooksLikeValidSupabasePoolerUrl(coerced);
+    warnIfDirectSupabaseDbHost(coerced);
     return coerced;
   }
 
   throw new Error(
-    `Missing Postgres connection string in your environment (.env.local at the project root).\n\n` +
+    `Missing Postgres connection string in your environment (.env at the project root).\n\n` +
       `Add one of: ${POSTGRES_URI_ENV_KEYS.join(", ")}\n\n` +
       `Supabase: Dashboard → Settings → Database → Connection string → **URI**\n` +
       `Prefer the **Transaction pool / pooler** URL (often port \"6543\") for Next.js.\n\n` +

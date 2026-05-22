@@ -3,7 +3,11 @@
 import { useEffect, useMemo } from "react";
 import { Music2, Play } from "lucide-react";
 
-import type { LocalSong } from "@/lib/music-library/idb";
+import {
+  trackArtworkSrc,
+  trackHasArtBlob,
+  type LibraryTrack,
+} from "@/lib/music-library/library-track";
 import {
   getPeriodLabel,
   getTopPlayedSongs,
@@ -74,8 +78,15 @@ function TopPlayedList({
                     {index + 1}
                   </span>
                   <div className="relative flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-sm border border-white/12 bg-black/30">
-                    {song.artworkBlob ?
+                    {trackHasArtBlob(song) ?
                       <MiniArtwork blob={song.artworkBlob} />
+                    : trackArtworkSrc(song) ?
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={trackArtworkSrc(song)!}
+                        alt=""
+                        className="absolute inset-0 size-full object-cover"
+                      />
                     : <Music2 className="size-4 text-white/55" />}
                   </div>
                   <div className="min-w-0 flex-1">
@@ -101,9 +112,9 @@ function TopPlayedList({
 }
 
 type TopPlayedPanelProps = {
-  songs: LocalSong[];
+  songs: LibraryTrack[];
   currentSongId: string | null;
-  onPlaySong: (song: LocalSong) => void;
+  onPlaySong: (song: LibraryTrack) => void;
 };
 
 export function TopPlayedPanel({

@@ -1,7 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
+  Cloud,
+  HardDrive,
   Loader2,
   Music2,
   Pause,
@@ -23,11 +26,25 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { AuthForm } from "@/components/auth/auth-form";
+import { SignInDialog } from "@/components/auth/sign-in-dialog";
+import { LanAccessHint } from "@/components/dev/lan-access-hint";
 import { SongFormDialog } from "@/components/music/song-form-dialog";
 import { TopPlayedPanel } from "@/components/music/top-played-panel";
+import { useAuth } from "@/contexts/auth-context";
 import { useAudioPlayer } from "@/contexts/audio-player-context";
 import { formatTime } from "@/lib/format-time";
-import { deleteSong, listSongs, type LocalSong } from "@/lib/music-library/idb";
+import {
+  attachSignedArtworkUrls,
+  fetchCloudLibrary,
+} from "@/lib/music-library/cloud-library";
+import { deleteSong, listSongs } from "@/lib/music-library/idb";
+import {
+  fromLocalSong,
+  trackArtworkSrc,
+  trackHasArtBlob,
+  type LibraryTrack,
+} from "@/lib/music-library/library-track";
 import {
   formatLastPlayed,
   formatPlayCount,
@@ -40,7 +57,11 @@ import {
   fetchLibraryScan,
   importLibraryFromSongsFolder,
 } from "@/lib/music-library/import-from-folder";
-import { isSupabaseConfigured } from "@/lib/supabase/env";
+import { syncLibraryToSupabase } from "@/lib/music-library/sync-to-supabase-client";
+import {
+  isSupabaseConfigured,
+  isValidServiceRoleConfigured,
+} from "@/lib/supabase/env";
 import { cn } from "@/lib/utils";
 
 type PlaylistOption = { id: string; label: string };
@@ -63,17 +84,36 @@ function ArtworkThumb({ blob }: { blob: Blob }) {
   );
 }
 
-function matchesPlaylist(song: LocalSong, playlistId: string) {
+function TrackArtwork({ track }: { track: LibraryTrack }) {
+  const cloudSrc = trackArtworkSrc(track);
+  if (trackHasArtBlob(track)) {
+    return <ArtworkThumb blob={track.artworkBlob} />;
+  }
+  if (cloudSrc) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={cloudSrc}
+        alt=""
+        className="absolute inset-0 block size-full object-cover"
+        draggable={false}
+      />
+    );
+  }
+  return <Music2 className="size-5 text-white/55" />;
+}
+
+function matchesPlaylist(song: LibraryTrack, playlistId: string) {
   if (playlistId === "all") return true;
   return song.playlistId === playlistId;
 }
 
-function getAlbumLabel(song: LocalSong) {
+function getAlbumLabel(song: LibraryTrack) {
   const albumName = song.album.trim() || "Unknown album";
   return song.releaseYear ? `${albumName} (${song.releaseYear})` : albumName;
 }
 
-function buildPlaylistOptions(songs: LocalSong[]): PlaylistOption[] {
+function buildPlaylistOptions(songs: LibraryTrack[]): PlaylistOption[] {
   const ids = new Set<string>();
   for (const song of songs) {
     if (song.playlistId.trim()) ids.add(song.playlistId);
@@ -85,7 +125,12 @@ function buildPlaylistOptions(songs: LocalSong[]): PlaylistOption[] {
 }
 
 export function LibraryPageClient() {
-  const [songs, setSongs] = useState<LocalSong[]>([]);
+  const { user, loading: authLoading, isConfigured } = useAuth();
+  const [signInOpen, setSignInOpen] = useState(false);
+  const [libraryMode, setLibraryMode] = useState<"cloud" | "local">("cloud");
+  const [songs, setSongs] = useState<LibraryTrack[]>([]);
+  const [cloudLoading, setCloudLoading] = useState(false);
+  const [cloudError, setCloudError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [formMode, setFormMode] = useState<"create" | "edit">("create");
   const [editId, setEditId] = useState<string | null>(null);
@@ -100,6 +145,15 @@ export function LibraryPageClient() {
     currentTitle: string;
   } | null>(null);
   const [importMessage, setImportMessage] = useState<string | null>(null);
+  const [cloudSyncing, setCloudSyncing] = useState(false);
+  const [cloudSyncProgress, setCloudSyncProgress] = useState<{
+    done: number;
+    total: number;
+    imported: number;
+    skipped: number;
+    failed: number;
+    currentTitle: string;
+  } | null>(null);
 
   const {
     currentSong,
@@ -111,19 +165,40 @@ export function LibraryPageClient() {
     togglePlay,
   } = useAudioPlayer();
 
-  const refresh = useCallback(async () => {
-    setSongs(await listSongs());
+  const refreshLocal = useCallback(async () => {
+    const rows = await listSongs();
+    setSongs(rows.map(fromLocalSong));
+  }, []);
+
+  const refreshCloud = useCallback(async () => {
+    setCloudLoading(true);
+    setCloudError(null);
+    try {
+      const tracks = await fetchCloudLibrary();
+      setSongs(tracks);
+      void attachSignedArtworkUrls(tracks).then((withArt) => {
+        setSongs(withArt);
+      });
+    } catch (err) {
+      setCloudError(
+        err instanceof Error ? err.message : "Could not load cloud library.",
+      );
+      setSongs([]);
+    } finally {
+      setCloudLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    void listSongs().then((rows) => {
-      if (!cancelled) setSongs(rows);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (authLoading) return;
+    if (user) {
+      setLibraryMode("cloud");
+      void refreshCloud();
+    } else {
+      setLibraryMode("local");
+      void refreshLocal();
+    }
+  }, [user, authLoading, refreshCloud, refreshLocal]);
 
   useEffect(() => {
     const onPlayRecorded = (event: Event) => {
@@ -212,6 +287,57 @@ export function LibraryPageClient() {
     return counts;
   }, [playableSongs, playlistOptions]);
 
+  async function handleSyncToSupabase() {
+    if (!user) {
+      setSignInOpen(true);
+      setImportMessage("Sign in first — uploads are saved to your account.");
+      return;
+    }
+
+    setImportMessage(null);
+    const ok = window.confirm(
+      "Upload all songs from Songs/ to Supabase (metadata, lyrics, mp3, artwork)? This can take a long time.",
+    );
+    if (!ok) return;
+
+    setCloudSyncing(true);
+    setCloudSyncProgress({
+      done: 0,
+      total: 0,
+      imported: 0,
+      skipped: 0,
+      failed: 0,
+      currentTitle: "",
+    });
+
+    try {
+      const result = await syncLibraryToSupabase({
+        onProgress: setCloudSyncProgress,
+        playlistId: playlist === "all" ? undefined : playlist,
+      });
+      let msg = `Cloud sync: ${result.imported} uploaded, ${result.skipped} skipped, ${result.failed} failed (${result.total} in Songs/).`;
+      if (result.imported === 0 && !isValidServiceRoleConfigured()) {
+        msg +=
+          " Set SUPABASE_SERVICE_ROLE_KEY in .env (Dashboard → API → service_role), restart dev, then upload again.";
+      }
+      if (result.sampleErrors.length > 0) {
+        msg += ` ${result.sampleErrors.join(" · ")}`;
+      }
+      setImportMessage(msg);
+      if (user) {
+        setLibraryMode("cloud");
+        await refreshCloud();
+      }
+    } catch (err) {
+      setImportMessage(
+        err instanceof Error ? err.message : "Cloud sync failed.",
+      );
+    } finally {
+      setCloudSyncing(false);
+      setCloudSyncProgress(null);
+    }
+  }
+
   async function handleImportFromSongsFolder() {
     setImportMessage(null);
     let scan;
@@ -243,7 +369,7 @@ export function LibraryPageClient() {
         await importLibraryFromSongsFolder({
           onProgress: setImportProgress,
         });
-      await refresh();
+      await refreshLocal();
       const skipNote =
         skipped > 0 ? ` ${skipped} skipped (0:00 duration).` : "";
       setImportMessage(
@@ -263,20 +389,28 @@ export function LibraryPageClient() {
 
   async function confirmDelete() {
     if (!deleteId) return;
+    const target = songs.find((s) => s.id === deleteId);
+    if (target?.source !== "local") {
+      setDeleteId(null);
+      return;
+    }
     removeSongFromPlayer(deleteId);
     await deleteSong(deleteId);
     setDeleteId(null);
-    await refresh();
+    await refreshLocal();
   }
 
-  function playSongFromLibrary(target: LocalSong, pool: LocalSong[] = filteredSongs) {
+  function playSongFromLibrary(
+    target: LibraryTrack,
+    pool: LibraryTrack[] = filteredSongs,
+  ) {
     if (currentSong?.id === target.id) {
       togglePlay();
       return;
     }
     const idx = pool.findIndex((s) => s.id === target.id);
     if (idx < 0) return;
-    playQueue(pool, idx);
+    void playQueue(pool, idx);
   }
 
   function handlePlaySong(index: number) {
@@ -294,8 +428,10 @@ export function LibraryPageClient() {
       return;
     }
 
-    playQueue(filteredSongs, index);
+    void playQueue(filteredSongs, index);
   }
+
+  const isCloudView = libraryMode === "cloud" && Boolean(user);
 
   return (
     <div className="relative overflow-hidden">
@@ -315,6 +451,50 @@ export function LibraryPageClient() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {user ?
+              <div className="flex rounded-md border border-white/15 bg-white/6 p-0.5">
+                <button
+                  type="button"
+                  className={cn(
+                    "flex h-8 items-center gap-1.5 rounded px-2.5 text-xs font-medium transition",
+                    libraryMode === "cloud" ?
+                      "bg-white/14 text-white"
+                    : "text-white/60 hover:text-white",
+                  )}
+                  onClick={() => {
+                    setLibraryMode("cloud");
+                    void refreshCloud();
+                  }}
+                >
+                  <Cloud className="size-3.5" />
+                  Cloud
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    "flex h-8 items-center gap-1.5 rounded px-2.5 text-xs font-medium transition",
+                    libraryMode === "local" ?
+                      "bg-white/14 text-white"
+                    : "text-white/60 hover:text-white",
+                  )}
+                  onClick={() => {
+                    setLibraryMode("local");
+                    void refreshLocal();
+                  }}
+                >
+                  <HardDrive className="size-3.5" />
+                  This device
+                </button>
+              </div>
+            : isConfigured ?
+              <Button
+                type="button"
+                className="h-9 border-violet-400/30 bg-violet-500/20 text-white hover:bg-violet-500/30"
+                onClick={() => setSignInOpen(true)}
+              >
+                Sign in
+              </Button>
+            : null}
             <Button
               type="button"
               variant="outline"
@@ -322,7 +502,12 @@ export function LibraryPageClient() {
                 "h-9 border-white/20 bg-white/8 text-white hover:bg-white/14",
                 isShuffle && "border-violet-300/40 bg-violet-500/20",
               )}
-              disabled={importing || filteredSongs.length === 0}
+              disabled={
+                importing ||
+                cloudSyncing ||
+                cloudLoading ||
+                filteredSongs.length === 0
+              }
               onClick={() => void startShuffle(filteredSongs)}
             >
               <Shuffle className="size-4" />
@@ -332,7 +517,21 @@ export function LibraryPageClient() {
               type="button"
               variant="outline"
               className="h-9 border-white/20 bg-white/8 text-white hover:bg-white/14"
-              disabled={importing}
+              disabled={importing || cloudSyncing || !isConfigured}
+              onClick={() => void handleSyncToSupabase()}
+            >
+              {cloudSyncing ?
+                <>
+                  <Loader2 className="animate-spin" />
+                  Uploading…
+                </>
+              : "Upload to Supabase"}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-9 border-white/20 bg-white/8 text-white hover:bg-white/14"
+              disabled={importing || cloudSyncing}
               onClick={() => void handleImportFromSongsFolder()}
             >
               {importing ?
@@ -345,7 +544,7 @@ export function LibraryPageClient() {
             <Button
               type="button"
               className="h-9 rounded-md bg-white px-4 text-sm font-semibold text-black hover:bg-white/90"
-              disabled={importing}
+              disabled={importing || isCloudView}
               onClick={() => {
                 setFormMode("create");
                 setEditId(null);
@@ -369,9 +568,40 @@ export function LibraryPageClient() {
           </div>
         : null}
 
+        {cloudSyncProgress ?
+          <div className="rounded-2xl border border-violet-400/20 bg-violet-500/10 px-4 py-3 text-sm text-white/85">
+            <p className="flex items-center gap-2">
+              <Loader2 className="size-4 shrink-0 animate-spin" />
+              Supabase {cloudSyncProgress.done} / {cloudSyncProgress.total}
+              {cloudSyncProgress.currentTitle ?
+                ` — ${cloudSyncProgress.currentTitle}`
+              : null}
+            </p>
+            <p className="mt-1 text-xs text-white/55">
+              {cloudSyncProgress.imported} uploaded · {cloudSyncProgress.skipped}{" "}
+              skipped · {cloudSyncProgress.failed} failed
+            </p>
+          </div>
+        : null}
+
+        <LanAccessHint />
+
         {importMessage ?
           <p className="rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-sm text-white/78">
             {importMessage}
+          </p>
+        : null}
+
+        {cloudError ?
+          <p className="rounded-2xl border border-red-400/25 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+            {cloudError}
+          </p>
+        : null}
+
+        {cloudLoading ?
+          <p className="flex items-center gap-2 rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-sm text-white/78">
+            <Loader2 className="size-4 animate-spin" />
+            Loading cloud library…
           </p>
         : null}
 
@@ -393,12 +623,42 @@ export function LibraryPageClient() {
               </div>
             </div>
 
-            {!isSupabaseConfigured() ?
-              <p className="mt-4 rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-xs text-white/68">
-                Supabase env vars are not set yet. Tracks are currently stored
-                in your browser until you wire the database and storage layer.
+            {isCloudView ?
+              <p className="mt-4 rounded-2xl border border-violet-400/20 bg-violet-500/10 px-4 py-3 text-xs text-white/72">
+                Cloud library for <span className="text-white">{user?.email}</span>.
+                Tracks uploaded from your PC appear here on every signed-in device.
               </p>
-            : null}
+            : !isSupabaseConfigured() ?
+              <p className="mt-4 rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-xs text-white/68">
+                Supabase env vars are not set. This device uses local browser
+                storage only.
+              </p>
+            : !user && isConfigured ?
+              <div className="mt-4 rounded-2xl border border-violet-400/25 bg-violet-500/10 p-5 sm:p-6">
+                <h2 className="text-lg font-semibold text-white">
+                  Sign in to your account
+                </h2>
+                <p className="mt-2 max-w-xl text-sm text-white/65">
+                  Songs you upload from your computer are tied to your Muse
+                  account. Sign in here (or on your phone) to see and play the
+                  same library everywhere.
+                </p>
+                <div className="mt-5 max-w-md">
+                  <AuthForm
+                    compact
+                    onSuccess={() => {
+                      setLibraryMode("cloud");
+                      void refreshCloud();
+                    }}
+                  />
+                </div>
+              </div>
+            : !user ?
+              null
+            : <p className="mt-4 rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-xs text-white/68">
+                Local library on this browser only. Switch to Cloud for synced
+                tracks.
+              </p>}
 
             <div className="mt-6">
               <div className="grid grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)_minmax(0,1fr)_132px] gap-4 border-b border-white/10 px-4 pb-3 text-[1.05rem] font-semibold text-white">
@@ -417,7 +677,11 @@ export function LibraryPageClient() {
                         No songs match this view
                       </p>
                       <p className="mt-1 text-sm text-white/55">
-                        Import a track or switch playlists to populate the table.
+                        {isCloudView ?
+                          songs.length > 0 && playableSongs.length === 0 ?
+                            `${songs.length} cloud track(s) are hidden (0:00 duration). Re-upload from PC with valid mp3 files.`
+                          : "On your PC: sign in → Upload to Supabase. On this device: same account → Cloud tab."
+                        : "Import a track or switch playlists to populate the table."}
                       </p>
                     </div>
                   </div>
@@ -439,9 +703,7 @@ export function LibraryPageClient() {
                           >
                             <div className="flex min-w-0 items-center gap-3">
                               <div className="relative flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-sm border border-white/12 bg-black/30">
-                                {song.artworkBlob ?
-                                  <ArtworkThumb blob={song.artworkBlob} />
-                                : <Music2 className="size-5 text-white/55" />}
+                                <TrackArtwork track={song} />
                               </div>
 
                               <div
@@ -488,27 +750,31 @@ export function LibraryPageClient() {
                                 : <Play className="ml-0.5 size-4 fill-current text-white" />}
                               </button>
 
-                              <button
-                                type="button"
-                                className="grid size-8 place-items-center rounded-full border border-white/14 bg-white/6 text-white/75 transition hover:bg-white/14 hover:text-white"
-                                aria-label={`Edit ${song.title}`}
-                                onClick={() => {
-                                  setFormMode("edit");
-                                  setEditId(song.id);
-                                  setFormOpen(true);
-                                }}
-                              >
-                                <Pencil className="size-3.5" />
-                              </button>
+                              {song.source === "local" ?
+                                <>
+                                  <button
+                                    type="button"
+                                    className="grid size-8 place-items-center rounded-full border border-white/14 bg-white/6 text-white/75 transition hover:bg-white/14 hover:text-white"
+                                    aria-label={`Edit ${song.title}`}
+                                    onClick={() => {
+                                      setFormMode("edit");
+                                      setEditId(song.id);
+                                      setFormOpen(true);
+                                    }}
+                                  >
+                                    <Pencil className="size-3.5" />
+                                  </button>
 
-                              <button
-                                type="button"
-                                className="grid size-8 place-items-center rounded-full border border-red-300/20 bg-red-400/10 text-red-100 transition hover:bg-red-400/18"
-                                aria-label={`Delete ${song.title}`}
-                                onClick={() => setDeleteId(song.id)}
-                              >
-                                <Trash2 className="size-3.5" />
-                              </button>
+                                  <button
+                                    type="button"
+                                    className="grid size-8 place-items-center rounded-full border border-red-300/20 bg-red-400/10 text-red-100 transition hover:bg-red-400/18"
+                                    aria-label={`Delete ${song.title}`}
+                                    onClick={() => setDeleteId(song.id)}
+                                  >
+                                    <Trash2 className="size-3.5" />
+                                  </button>
+                                </>
+                              : null}
                             </div>
                           </div>
                         </li>
@@ -575,7 +841,16 @@ export function LibraryPageClient() {
           onOpenChange={setFormOpen}
           mode={formMode}
           songId={editId}
-          onSaved={() => void refresh()}
+          onSaved={() => void refreshLocal()}
+        />
+
+        <SignInDialog
+          open={signInOpen}
+          onOpenChange={setSignInOpen}
+          onSuccess={() => {
+            setLibraryMode("cloud");
+            void refreshCloud();
+          }}
         />
 
         <AlertDialog

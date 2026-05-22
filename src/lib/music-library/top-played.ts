@@ -1,7 +1,7 @@
-import type { LocalSong } from "@/lib/music-library/idb";
+import type { LibraryTrack } from "@/lib/music-library/library-track";
 
 export type TopPlayedEntry = {
-  song: LocalSong;
+  song: LibraryTrack;
   playsInPeriod: number;
 };
 
@@ -45,7 +45,7 @@ export function countPlaysInRange(
 }
 
 export function getTopPlayedSongs(
-  songs: LocalSong[],
+  songs: LibraryTrack[],
   period: PlayPeriod,
   limit = 10,
   ref: Date = new Date(),

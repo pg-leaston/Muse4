@@ -3,8 +3,11 @@
 import type { ReactNode } from "react";
 import { ThemeProvider } from "next-themes";
 
+import { AuthProvider } from "@/contexts/auth-context";
+
 export function Providers({ children }: { children: ReactNode }) {
   return (
+    <AuthProvider>
     <ThemeProvider
       attribute="class"
       defaultTheme="system"
@@ -14,5 +17,6 @@ export function Providers({ children }: { children: ReactNode }) {
     >
       {children}
     </ThemeProvider>
+    </AuthProvider>
   );
 }

@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { createAdminClient } from "@/lib/supabase/admin";
 import { isMuseStorageBucket } from "@/lib/supabase/storage-buckets";
 import type { MuseStorageBucket } from "@/lib/supabase/storage-buckets";
+import { isValidServiceRoleConfigured } from "@/lib/supabase/env";
+import type { Database } from "@/types/database.types";
 import { createClient } from "@/utils/supabase/server";
 
 export const runtime = "nodejs";
@@ -40,6 +44,11 @@ export async function POST(request: Request) {
 
     const uid = user.id;
     const urls: Record<string, string> = {};
+    const missing: string[] = [];
+
+    /** Service role signs after we verify paths belong to this user (storage RLS often blocks client sign). */
+    const storageClient: SupabaseClient<Database> =
+      isValidServiceRoleConfigured() ? createAdminClient() : supabase;
 
     for (const item of items) {
       if (!isMuseStorageBucket(item.bucket)) {
@@ -54,20 +63,22 @@ export async function POST(request: Request) {
         );
       }
 
-      const { data, error } = await supabase.storage
+      const { data, error } = await storageClient.storage
         .from(item.bucket)
         .createSignedUrl(path, SIGNED_URL_TTL_SEC);
 
       if (error || !data?.signedUrl) {
-        return NextResponse.json(
-          { error: error?.message ?? `Could not sign ${item.key}` },
-          { status: 500 },
-        );
+        const msg = error?.message ?? `Could not sign ${item.key}`;
+        if (/not found/i.test(msg)) {
+          missing.push(item.key);
+          continue;
+        }
+        return NextResponse.json({ error: msg }, { status: 500 });
       }
       urls[item.key] = data.signedUrl;
     }
 
-    return NextResponse.json({ urls });
+    return NextResponse.json({ urls, missing });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Sign failed.";
     return NextResponse.json({ error: message }, { status: 500 });

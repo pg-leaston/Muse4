@@ -65,10 +65,12 @@ export async function attachSignedPlaybackUrls(
     });
     const data = (await res.json()) as {
       urls?: Record<string, string>;
+      missing?: string[];
       error?: string;
     };
     if (!res.ok) {
-      throw new Error(data.error ?? "Could not sign media URLs.");
+      console.warn("Cloud sign batch failed:", data.error);
+      continue;
     }
     Object.assign(urls, data.urls ?? {});
   }

@@ -315,7 +315,7 @@ export function LibraryPageClient() {
         onProgress: setCloudSyncProgress,
         playlistId: playlist === "all" ? undefined : playlist,
       });
-      let msg = `Cloud sync: ${result.imported} uploaded, ${result.skipped} skipped, ${result.failed} failed (${result.total} in Songs/).`;
+      let msg = `Cloud sync: ${result.imported} uploaded, ${result.skipped} skipped (0:00 or no title), ${result.failed} failed (${result.total} in Songs/).`;
       if (result.imported === 0 && !isValidServiceRoleConfigured()) {
         msg +=
           " Set SUPABASE_SERVICE_ROLE_KEY in .env (Dashboard → API → service_role), restart dev, then upload again.";

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { extname } from "node:path";
 
 import { parseFile } from "music-metadata";
@@ -32,14 +32,54 @@ function artworkContentType(filename: string): string {
   return "image/png";
 }
 
-async function readDurationSeconds(audioPath: string): Promise<number | null> {
+type AudioProbe = {
+  durationSeconds: number | null;
+  /** True only when length is known and exactly unusable (0:00). */
+  isZeroLength: boolean;
+  tagTitle: string;
+  tagArtist: string;
+};
+
+async function probeAudioFile(audioPath: string): Promise<AudioProbe> {
   try {
-    const metadata = await parseFile(audioPath);
+    const metadata = await parseFile(audioPath, { duration: true });
     const d = metadata.format.duration;
-    return d != null && Number.isFinite(d) && d > 0 ? d : null;
+    const isZeroLength =
+      d != null && Number.isFinite(d) && d <= 0;
+    const durationSeconds =
+      d != null && Number.isFinite(d) && d > 0 ? d : null;
+    const tagTitle = metadata.common.title?.trim() ?? "";
+    const tagArtist =
+      metadata.common.artist?.trim() ??
+      metadata.common.artists?.[0]?.trim() ??
+      "";
+    return { durationSeconds, isZeroLength, tagTitle, tagArtist };
   } catch {
-    return null;
+    return {
+      durationSeconds: null,
+      isZeroLength: false,
+      tagTitle: "",
+      tagArtist: "",
+    };
   }
+}
+
+function resolveMetadata(song: ScannedSong, probe: AudioProbe): {
+  title: string;
+  artist: string;
+} | null {
+  const title =
+    song.title.trim() ||
+    probe.tagTitle ||
+    song.folderName.trim();
+  if (!title) return null;
+
+  const artist =
+    song.artist.trim() ||
+    probe.tagArtist ||
+    "Unknown Artist";
+
+  return { title, artist };
 }
 
 export async function syncScannedSongToSupabase(options: {
@@ -57,10 +97,24 @@ export async function syncScannedSongToSupabase(options: {
     return { ...base, result: "failed", error: "Invalid audio path" };
   }
 
-  const durationSeconds = await readDurationSeconds(audioAbs);
-  if (durationSeconds == null) {
-    return { ...base, result: "skipped", error: "0:00 or unreadable audio" };
+  try {
+    await access(audioAbs);
+  } catch {
+    return { ...base, result: "failed", error: "MP3 file missing on disk" };
   }
+
+  const probe = await probeAudioFile(audioAbs);
+  if (probe.isZeroLength) {
+    return { ...base, result: "skipped", error: "0:00 audio" };
+  }
+
+  const resolved = resolveMetadata(song, probe);
+  if (!resolved) {
+    return { ...base, result: "skipped", error: "Missing title" };
+  }
+
+  const { title, artist } = resolved;
+  const durationSeconds = probe.durationSeconds;
 
   const songId = songUuidFromSourceKey(song.id);
   const audioStoragePath = `${userId}/songs/${songId}/audio.mp3`;
@@ -92,7 +146,7 @@ export async function syncScannedSongToSupabase(options: {
             upsert: true,
           });
         if (artError) {
-          return { ...base, result: "failed", error: artError.message };
+          artworkStoragePath = null;
         }
       }
     }
@@ -101,8 +155,8 @@ export async function syncScannedSongToSupabase(options: {
     const row: Database["public"]["Tables"]["songs"]["Insert"] = {
       id: songId,
       user_id: userId,
-      title: song.title,
-      artist: song.artist,
+      title,
+      artist,
       album: song.album,
       release_year: song.releaseYear,
       audio_storage_path: audioStoragePath,
